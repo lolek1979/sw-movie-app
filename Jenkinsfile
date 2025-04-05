@@ -1,64 +1,55 @@
-pipeline {
-    agent {
-        docker {
-            image 'docker:20.10.7'
-            args '-v /var/run/docker.sock:/var/run/docker.sock'
-        }
-    }
-    parameters {
-        string(name: 'BASE_VERSION', defaultValue: '1.0', description: 'Set the base version (e.g., 2.0)')
-    }
-    environment {
-        DOCKERHUB_CREDENTIALS = credentials('docker-hub-creds')
-        GITHUB_CREDENTIALS = credentials('github-creds')
-        ARGOCD_TOKEN = credentials('argocd-token')
-        ARGOCD_SERVER = "k8s.orb.local"
-        IMAGE_NAME = "pkonieczny321/sw-movie-app"
-        // Combine the parameter with the Jenkins BUILD_NUMBER to create a semantic version tag
-        IMAGE_TAG = "${params.BASE_VERSION}.${env.BUILD_NUMBER}"
-    }
-    stages {
+node {
+    // Run inside a Docker container that has the Docker CLI.
+    docker.image('docker:20.10.7').inside('-v /var/run/docker.sock:/var/run/docker.sock') {
+        // Define image details. You can use a fixed tag like "1.0.0" or incorporate BUILD_NUMBER.
+        def imageName = "pkonieczny321/sw-movie-app"
+        def imageTag = "1.0.0" // For example; alternatively, use "${env.BUILD_NUMBER}" or a combination.
+
         stage('Checkout') {
-            steps {
-                echo "Checking out sw-movie-app repository..."
-                checkout([
-                    $class: 'GitSCM',
-                    branches: [[name: '*/main']],
-                    userRemoteConfigs: [[
-                        url: 'https://github.com/lolek1979/sw-movie-app.git',
-                        credentialsId: 'github-creds'
-                    ]]
-                ])
-            }
+            echo "Checking out sw-movie-app repository..."
+            checkout([
+                $class: 'GitSCM',
+                branches: [[name: '*/main']],
+                userRemoteConfigs: [[
+                    url: 'https://github.com/lolek1979/sw-movie-app.git',
+                    credentialsId: 'github-creds'
+                ]]
+            ])
         }
+
         stage('Build Docker Image') {
-            steps {
-                echo "Building Docker image ${IMAGE_NAME}:${IMAGE_TAG}..."
-                sh "docker build -t ${IMAGE_NAME}:${IMAGE_TAG} ."
-            }
+            echo "Building Docker image ${imageName}:${imageTag}..."
+            sh "docker build -t ${imageName}:${imageTag} ."
         }
+
         stage('Push Docker Image') {
-            steps {
-                echo "Pushing image to Docker Hub..."
-                sh "docker login -u ${DOCKERHUB_CREDENTIALS_USR} -p ${DOCKERHUB_CREDENTIALS_PSW}"
-                sh "docker push ${IMAGE_NAME}:${IMAGE_TAG}"
+            echo "Logging in to Docker Hub and pushing the image..."
+            // Use withCredentials to access Docker Hub credentials.
+            withCredentials([usernamePassword(
+                credentialsId: 'docker-hub-creds',
+                usernameVariable: 'DOCKERHUB_USER',
+                passwordVariable: 'DOCKERHUB_PASSWORD'
+            )]) {
+                sh "docker login -u ${DOCKERHUB_USER} -p ${DOCKERHUB_PASSWORD}"
             }
+            sh "docker push ${imageName}:${imageTag}"
         }
+
         stage('Deploy via Argo CD') {
-            steps {
-                echo "Deploying sw-movie-app via Argo CD..."
-                sh "argocd login ${ARGOCD_SERVER} --auth-token=${ARGOCD_TOKEN} --insecure"
+            echo "Deploying sw-movie-app via Argo CD..."
+            // Use withCredentials for the Argo CD token.
+            withCredentials([string(credentialsId: 'argocd-token', variable: 'ARGOCD_TOKEN')]) {
+                // Log in to Argo CD. Adjust the server address if needed.
+                sh "argocd login k8s.orb.local --auth-token=${ARGOCD_TOKEN} --insecure"
+                // Trigger a sync of the sw-movie-app application.
                 sh "argocd app sync sw-movie-app"
+                // Wait for the application to become synced and healthy.
                 sh "argocd app wait sw-movie-app --sync --health --timeout 300"
             }
         }
-    }
-    post {
-        success {
-            echo "Deployment succeeded!"
+
+        stage('Post Deployment') {
+            echo "Deployment triggered successfully. Check Argo CD for the updated sw-movie-app status."
         }
-        failure {
-            echo "Deployment failed. Check logs for errors."
-        }
-    }
+    } // End of docker.image block.
 }
