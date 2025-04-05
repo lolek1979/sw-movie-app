@@ -1,47 +1,64 @@
-node {
-    // Set up environment variables from credentials and other values
-    env.DOCKERHUB_CREDENTIALS = credentials('docker-hub-creds')
-    env.GITHUB_CREDENTIALS = credentials('github-creds')
-    env.ARGOCD_TOKEN = credentials('argocd-token')
-    env.ARGOCD_SERVER = "k8s.orb.local"  // Adjust if needed; this is the address for your Argo CD server via OrbStack
-    env.IMAGE_NAME = "pkonieczny321/sw-movie-app"
-    env.IMAGE_TAG = "${env.BUILD_NUMBER}"  // Use Jenkins build number for versioning
-
-    stage('Checkout') {
-        echo "Checking out sw-movie-app repository..."
-        checkout([
-            $class: 'GitSCM',
-            branches: [[name: '*/main']],   // Change 'main' to your branch name if needed
-            userRemoteConfigs: [[
-                url: 'https://github.com/lolek1979/sw-movie-app.git',
-                credentialsId: 'github-creds'
-            ]]
-        ])
-    }
-
-    stage('Build Docker Image') {
-        echo "Building Docker image ${IMAGE_NAME}:${IMAGE_TAG}..."
-        def image = docker.build("${IMAGE_NAME}:${IMAGE_TAG}")
-    }
-
-    stage('Push Docker Image') {
-        echo "Pushing image to Docker Hub..."
-        docker.withRegistry('https://index.docker.io/v1/', "${DOCKERHUB_CREDENTIALS}") {
-            sh "docker push ${IMAGE_NAME}:${IMAGE_TAG}"
+pipeline {
+    agent {
+        docker {
+            image 'docker:20.10.7'
+            args '-v /var/run/docker.sock:/var/run/docker.sock'
         }
     }
-
-    stage('Deploy via Argo CD') {
-        echo "Deploying sw-movie-app via Argo CD..."
-        // Log in to Argo CD (use --insecure if you're using self-signed certificates)
-        sh "argocd login ${ARGOCD_SERVER} --auth-token=${ARGOCD_TOKEN} --insecure"
-        // Trigger a sync of the sw-movie-app application
-        sh "argocd app sync sw-movie-app"
-        // Optionally wait for the app to be in a healthy state (adjust timeout if necessary)
-        sh "argocd app wait sw-movie-app --sync --health --timeout 300"
+    parameters {
+        string(name: 'BASE_VERSION', defaultValue: '1.0', description: 'Set the base version (e.g., 2.0)')
     }
-
-    stage('Post Deployment') {
-        echo "Deployment triggered successfully. Check Argo CD for the updated sw-movie-app status."
+    environment {
+        DOCKERHUB_CREDENTIALS = credentials('docker-hub-creds')
+        GITHUB_CREDENTIALS = credentials('github-creds')
+        ARGOCD_TOKEN = credentials('argocd-token')
+        ARGOCD_SERVER = "k8s.orb.local"
+        IMAGE_NAME = "pkonieczny321/sw-movie-app"
+        // Combine the parameter with the Jenkins BUILD_NUMBER to create a semantic version tag
+        IMAGE_TAG = "${params.BASE_VERSION}.${env.BUILD_NUMBER}"
+    }
+    stages {
+        stage('Checkout') {
+            steps {
+                echo "Checking out sw-movie-app repository..."
+                checkout([
+                    $class: 'GitSCM',
+                    branches: [[name: '*/main']],
+                    userRemoteConfigs: [[
+                        url: 'https://github.com/lolek1979/sw-movie-app.git',
+                        credentialsId: 'github-creds'
+                    ]]
+                ])
+            }
+        }
+        stage('Build Docker Image') {
+            steps {
+                echo "Building Docker image ${IMAGE_NAME}:${IMAGE_TAG}..."
+                sh "docker build -t ${IMAGE_NAME}:${IMAGE_TAG} ."
+            }
+        }
+        stage('Push Docker Image') {
+            steps {
+                echo "Pushing image to Docker Hub..."
+                sh "docker login -u ${DOCKERHUB_CREDENTIALS_USR} -p ${DOCKERHUB_CREDENTIALS_PSW}"
+                sh "docker push ${IMAGE_NAME}:${IMAGE_TAG}"
+            }
+        }
+        stage('Deploy via Argo CD') {
+            steps {
+                echo "Deploying sw-movie-app via Argo CD..."
+                sh "argocd login ${ARGOCD_SERVER} --auth-token=${ARGOCD_TOKEN} --insecure"
+                sh "argocd app sync sw-movie-app"
+                sh "argocd app wait sw-movie-app --sync --health --timeout 300"
+            }
+        }
+    }
+    post {
+        success {
+            echo "Deployment succeeded!"
+        }
+        failure {
+            echo "Deployment failed. Check logs for errors."
+        }
     }
 }
